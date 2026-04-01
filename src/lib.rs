@@ -29,7 +29,8 @@ fn spawn_root_task(fut: impl Future<Output = ()> + 'static) {
     CURRENT_ID.get().unwrap().unpark();
 }
 
-pub fn spawn_single(fut: impl Future<Output = ()> + 'static) {
+pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
+    assert!(thread::current().id() == CURRENT_ID.get().unwrap().id());
     let task = Tarea(Box::into_raw(Box::new(Inner {
         ref_counter: AtomicUsize::new(1),
         id: TASK_ID.fetch_add(1, Relaxed),
@@ -43,7 +44,7 @@ pub fn spawn_single(fut: impl Future<Output = ()> + 'static) {
     CURRENT_ID.get().unwrap().unpark();
 }
 
-pub fn spawn_multi(fut: impl Future<Output = ()> + Send + 'static) {
+pub fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     let task = Tarea(Box::into_raw(Box::new(Inner {
         ref_counter: AtomicUsize::new(1),
         id: TASK_ID.fetch_add(1, Relaxed),
