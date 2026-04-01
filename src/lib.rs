@@ -1,13 +1,21 @@
-use std::{alloc::{Layout, alloc}, marker::PhantomData, mem::{self, MaybeUninit}, sync::{OnceLock, atomic::{Ordering::*, *}}, task::{Context, RawWaker, RawWakerVTable, Waker}, u8, u64};
 use std::cell::UnsafeCell;
 use std::pin::Pin;
 use std::thread::{self, Thread};
-
-
+use std::{
+    alloc::{Layout, alloc},
+    marker::PhantomData,
+    mem::{self, MaybeUninit},
+    sync::{
+        OnceLock,
+        atomic::{Ordering::*, *},
+    },
+    task::{Context, RawWaker, RawWakerVTable, Waker},
+    u8, u64,
+};
 
 static CURRENT: OnceLock<SyncRing> = OnceLock::new();
 static CURRENT_ID: OnceLock<Thread> = OnceLock::new();
-static MULTI: OnceLock<SyncRing> = OnceLock::new(); 
+static MULTI: OnceLock<SyncRing> = OnceLock::new();
 static WORKERS_BITMAP: AtomicU64 = AtomicU64::new(0);
 static WORKERS_ID: OnceLock<Vec<MaybeUninit<Thread>>> = OnceLock::new();
 static READY: AtomicU64 = AtomicU64::new(0);
@@ -57,7 +65,9 @@ pub fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     TASK_COUNTER.fetch_add(1, Relaxed);
     let order = GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE.fetch_add(1, Relaxed);
     let map = WORKERS_BITMAP.load(Relaxed);
-    if map == 0 {return;}
+    if map == 0 {
+        return;
+    }
     let idx = if (order & 1) == 0 {
         map.trailing_zeros() as usize
     } else {
@@ -69,12 +79,9 @@ pub fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
     }
 }
 
-
-
 pub struct Executor {
     marker: PhantomData<*mut ()>,
 }
-
 
 impl Executor {
     pub fn new() -> Self {
@@ -88,7 +95,9 @@ impl Executor {
         let _ = MULTI.set(SyncRing::new());
         let mut cores = num_cpus::get();
         assert!(cores > 0);
-        if cores > 64 {cores = 64}
+        if cores > 64 {
+            cores = 64
+        }
         let mut threads_ids = Vec::with_capacity(cores);
         for _ in 0..cores {
             threads_ids.push(MaybeUninit::uninit());
@@ -101,14 +110,14 @@ impl Executor {
             (1 << cores) - 1
         };
         WORKERS_BITMAP.fetch_or(map, Relaxed);
-        
+
         for i in 0..cores {
-            
             std::thread::spawn(move || {
                 let worker_idx = i;
                 let worker_flag = (1 << worker_idx) as u64;
                 unsafe {
-                    (*(WORKERS_ID.get().unwrap().as_ptr() as *mut MaybeUninit<Thread>).add(worker_idx))
+                    (*(WORKERS_ID.get().unwrap().as_ptr() as *mut MaybeUninit<Thread>)
+                        .add(worker_idx))
                     .write(thread::current());
                 }
                 READY.fetch_add(1, Release);
@@ -133,8 +142,12 @@ impl Executor {
                                             unsafe {
                                                 (*t.data().future.get()) = Some(f);
                                             }
-                                            match t.data().state.compare_exchange(state, 0, Relaxed, Relaxed) {
-                                                Ok(_) => {break 'tag}
+                                            match t
+                                                .data()
+                                                .state
+                                                .compare_exchange(state, 0, Relaxed, Relaxed)
+                                            {
+                                                Ok(_) => break 'tag,
                                                 Err(_) => {
                                                     fut = t.get_future();
                                                     t.data().state.fetch_and(1, Acquire);
@@ -187,9 +200,7 @@ impl Executor {
                     }
                 }
             }
-            if spin_loop_counter < 3 {
-
-            }
+            if spin_loop_counter < 3 {}
         }
     }
 }
@@ -218,15 +229,11 @@ impl Drop for Tarea {
 
 impl Tarea {
     fn data(&self) -> &Inner {
-        unsafe {
-            &*self.0
-        }
+        unsafe { &*self.0 }
     }
 
     fn get_future(&self) -> Option<Pin<Box<dyn Future<Output = ()>>>> {
-        unsafe {
-            (*self.data().future.get()).take()
-        }
+        unsafe { (*self.data().future.get()).take() }
     }
 }
 
@@ -236,7 +243,7 @@ struct Inner {
     id: u64,
     //primer bit = en ejecucion, segundo bit = notificacion para volver a ejecutar.
     state: AtomicU8,
-    future: UnsafeCell<Option<Pin<Box<dyn Future<Output = ()>+ 'static>>>>,
+    future: UnsafeCell<Option<Pin<Box<dyn Future<Output = ()> + 'static>>>>,
     ring: SyncRing,
     multi_thread: u8,
 }
@@ -249,15 +256,16 @@ impl Tarea {
         let clon = self.clone();
         mem::forget(clon);
         let data = self.0 as *const ();
-        let vtable = &RawWakerVTable::new(VTable::clone, VTable::wake, VTable::wake_by_ref, VTable::drop);
+        let vtable = &RawWakerVTable::new(
+            VTable::clone,
+            VTable::wake,
+            VTable::wake_by_ref,
+            VTable::drop,
+        );
         let raw_waker = RawWaker::new(data, vtable);
-        unsafe {
-            Waker::from_raw(raw_waker)
-        }
+        unsafe { Waker::from_raw(raw_waker) }
     }
 }
-
-
 
 #[derive(Clone, Copy)]
 struct SyncRing {
@@ -269,9 +277,7 @@ unsafe impl Sync for SyncRing {}
 
 impl SyncRing {
     fn inner(&self) -> &RawSyncRing {
-        unsafe {
-            &*self.ptr
-        }
+        unsafe { &*self.ptr }
     }
     fn new() -> Self {
         let ptr = Box::into_raw(Box::new(RawSyncRing::new(4096)));
@@ -295,9 +301,7 @@ impl RawSyncRing {
         assert!(cap <= isize::MAX as usize);
         assert!(cap.is_power_of_two());
         let layout = Layout::array::<Tarea>(cap).unwrap();
-        let ptr = unsafe {
-            alloc(layout) as *mut Tarea
-        };
+        let ptr = unsafe { alloc(layout) as *mut Tarea };
         assert!(!ptr.is_null());
 
         RawSyncRing {
@@ -317,7 +321,10 @@ impl RawSyncRing {
                 tail = self.writers_tail.load(Relaxed);
                 continue;
             }
-            match self.writers_tail.compare_exchange(tail, tail.wrapping_add(1), Relaxed, Relaxed) {
+            match self
+                .writers_tail
+                .compare_exchange(tail, tail.wrapping_add(1), Relaxed, Relaxed)
+            {
                 Ok(_) => break,
                 Err(e) => {
                     tail = e;
@@ -338,9 +345,7 @@ impl RawSyncRing {
         if head == self.rt_tail.load(Acquire) {
             return None;
         }
-        let res = unsafe {
-            Some(self.ptr.add(head & self.ring_mask).read())
-        };
+        let res = unsafe { Some(self.ptr.add(head & self.ring_mask).read()) };
         self.head.store(head.wrapping_add(1), Release);
         res
     }
@@ -351,17 +356,20 @@ impl RawSyncRing {
                 return None;
             }
             fence(Acquire);
-            match self.multi_thread_head.compare_exchange(multithread_head, multithread_head.wrapping_add(1), Relaxed, Relaxed) {
+            match self.multi_thread_head.compare_exchange(
+                multithread_head,
+                multithread_head.wrapping_add(1),
+                Relaxed,
+                Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(e) => {
                     multithread_head = e;
                     continue;
                 }
             }
-        } 
-        let res = unsafe {
-            Some(self.ptr.add(multithread_head & self.ring_mask).read())
-        };
+        }
+        let res = unsafe { Some(self.ptr.add(multithread_head & self.ring_mask).read()) };
         while multithread_head != self.head.load(Relaxed) {
             std::hint::spin_loop();
         }
@@ -369,8 +377,6 @@ impl RawSyncRing {
         res
     }
 }
-
-
 
 struct VTable;
 
@@ -380,7 +386,15 @@ impl VTable {
         let clone = task.clone();
         mem::forget(task);
         mem::forget(clone);
-        RawWaker::new(data, &RawWakerVTable::new(VTable::clone, VTable::wake, VTable::wake_by_ref, VTable::drop))
+        RawWaker::new(
+            data,
+            &RawWakerVTable::new(
+                VTable::clone,
+                VTable::wake,
+                VTable::wake_by_ref,
+                VTable::drop,
+            ),
+        )
     }
 
     fn wake(data: *const ()) {
@@ -389,15 +403,23 @@ impl VTable {
         let mut state = task.data().state.load(Relaxed);
         loop {
             if (state & 1) == 1 {
-                match task.data().state.compare_exchange(state, 3, Release, Relaxed) {
+                match task
+                    .data()
+                    .state
+                    .compare_exchange(state, 3, Release, Relaxed)
+                {
                     Ok(_) => return,
                     Err(e) => {
                         state = e;
                         continue;
-                    } 
+                    }
                 }
             } else {
-                match task.data().state.compare_exchange(state, 1, Relaxed, Relaxed) {
+                match task
+                    .data()
+                    .state
+                    .compare_exchange(state, 1, Relaxed, Relaxed)
+                {
                     Ok(_) => break,
                     Err(e) => {
                         state = e;
@@ -411,11 +433,13 @@ impl VTable {
         if is_multi == 1 {
             let order = GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE.fetch_add(1, Relaxed);
             let map = WORKERS_BITMAP.load(Relaxed);
-            if map == 0 {return;}
+            if map == 0 {
+                return;
+            }
             let idx = if (order & 1) == 0 {
                 map.trailing_zeros() as usize
             } else {
-                (63 - map.leading_zeros()) as usize 
+                (63 - map.leading_zeros()) as usize
             };
             WORKERS_BITMAP.fetch_and(!(1 << idx), Relaxed);
             unsafe {
@@ -424,7 +448,7 @@ impl VTable {
         } else {
             CURRENT_ID.get().unwrap().unpark();
         }
-    }   
+    }
 
     fn wake_by_ref(data: *const ()) {
         let task = Tarea(data as *const Inner);
@@ -432,7 +456,11 @@ impl VTable {
         let mut state = task.data().state.load(Relaxed);
         loop {
             if (state & 1) == 1 {
-                match task.data().state.compare_exchange(state, 3, Release, Relaxed) {
+                match task
+                    .data()
+                    .state
+                    .compare_exchange(state, 3, Release, Relaxed)
+                {
                     Ok(_) => return,
                     Err(e) => {
                         state = e;
@@ -440,7 +468,11 @@ impl VTable {
                     }
                 }
             } else {
-                match task.data().state.compare_exchange(state, 1, Relaxed, Relaxed) {
+                match task
+                    .data()
+                    .state
+                    .compare_exchange(state, 1, Relaxed, Relaxed)
+                {
                     Ok(_) => break,
                     Err(e) => {
                         state = e;
@@ -455,7 +487,9 @@ impl VTable {
         if is_multi == 1 {
             let order = GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE.fetch_add(1, Relaxed);
             let map = WORKERS_BITMAP.load(Relaxed);
-            if map == 0 {return;}
+            if map == 0 {
+                return;
+            }
             let idx = if (order & 1) == 0 {
                 map.trailing_zeros() as usize
             } else {
@@ -474,5 +508,3 @@ impl VTable {
         let _ = Tarea(data as *const _);
     }
 }
-
-
