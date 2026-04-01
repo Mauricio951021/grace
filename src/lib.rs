@@ -164,11 +164,13 @@ impl Executor {
                     }
                     if spin_loop_counter < 5 {
                         std::hint::spin_loop();
+                        if spin_loop_counter == 4 {
+                            WORKERS_BITMAP.fetch_or(worker_flag, Relaxed);
+                        }
                         spin_loop_counter += 1;
                         continue;
                     }
                     spin_loop_counter = 0;
-                    let _ = WORKERS_BITMAP.fetch_or(worker_flag, Relaxed);
                     thread::park();
                 }
             });
@@ -461,7 +463,10 @@ impl VTable {
                     .state
                     .compare_exchange(state, 3, Release, Relaxed)
                 {
-                    Ok(_) => return,
+                    Ok(_) => {
+                        mem::forget(task);
+                        return;
+                    }
                     Err(e) => {
                         state = e;
                         continue;
