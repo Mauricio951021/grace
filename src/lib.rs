@@ -183,6 +183,7 @@ impl Executor {
     }
 
     pub fn block_on(&self, fut: impl Future<Output = ()> + 'static) {
+        assert!(thread::current().id() == CURRENT_ID.get().unwrap().id());
         spawn_root_task(fut);
         let mut spin_loop_counter = 0u8;
         loop {
@@ -202,7 +203,11 @@ impl Executor {
                     }
                 }
             }
-            if spin_loop_counter < 3 {}
+            if spin_loop_counter < 3 {
+                spin_loop_counter += 1;
+                continue;
+            }
+            thread::park();
         }
     }
 }
