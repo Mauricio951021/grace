@@ -63,7 +63,7 @@ impl Task {
 pub(crate) struct Inner {
     pub(crate) ref_counter: AtomicUsize,
     #[allow(dead_code)]
-    id: u64,
+    pub(crate) id: u64,
     //primer bit = en ejecucion, segundo bit = notificacion para volver a ejecutar.
     pub(crate) state: AtomicU8,
     pub(crate) future: UnsafeCell<Option<Pin<Box<dyn Future<Output = ()> + 'static>>>>,

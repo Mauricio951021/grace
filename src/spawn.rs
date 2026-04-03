@@ -1,7 +1,13 @@
+use crate::global::*;
+use crate::task::*;
 
+
+use std::sync::atomic::{AtomicUsize, AtomicU8, Ordering::*};
+use std::cell::UnsafeCell;
+use std::thread;
 
 pub(crate) fn spawn_root_task(fut: impl Future<Output = ()> + 'static) {
-    let task = Tarea(Box::into_raw(Box::new(Inner {
+    let task = Task(Box::into_raw(Box::new(Inner {
         ref_counter: AtomicUsize::new(1),
         id: TASK_ID.fetch_add(1, Relaxed),
         state: AtomicU8::new(1),
@@ -16,7 +22,7 @@ pub(crate) fn spawn_root_task(fut: impl Future<Output = ()> + 'static) {
 
 pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
     assert!(thread::current().id() == CURRENT_ID.get().unwrap().id());
-    let task = Tarea(Box::into_raw(Box::new(Inner {
+    let task = Task(Box::into_raw(Box::new(Inner {
         ref_counter: AtomicUsize::new(1),
         id: TASK_ID.fetch_add(1, Relaxed),
         state: AtomicU8::new(1),
@@ -30,7 +36,7 @@ pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
 }
 
 pub fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
-    let task = Tarea(Box::into_raw(Box::new(Inner {
+    let task = Task(Box::into_raw(Box::new(Inner {
         ref_counter: AtomicUsize::new(1),
         id: TASK_ID.fetch_add(1, Relaxed),
         state: AtomicU8::new(1),
