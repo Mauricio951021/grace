@@ -1,5 +1,5 @@
 mod global;
-mod ring;
+pub mod ring;
 pub mod executor;
 mod task;
 mod waker;

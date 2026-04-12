@@ -88,9 +88,11 @@ impl Executor {
                                         }
                                     } else {
                                         TASK_COUNTER.fetch_sub(1, Relaxed);
+                                        break 'tag;
                                     }
                                 }
                             }
+                            break;
                         }
                     }
                     if spin_loop_counter < 5 {
@@ -142,3 +144,5 @@ impl Executor {
         }
     }
 }
+
+//fn unwind_safe_poll(task: Task)
