@@ -1,5 +1,6 @@
 use crate::global::*;
 use crate::task::*;
+use crate::sync::one_shot::*;
 
 
 use std::sync::atomic::{AtomicUsize, AtomicU8, Ordering::*};
@@ -35,7 +36,7 @@ pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
     CURRENT_ID.get().unwrap().unpark();
 }
 
-pub fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
+pub fn spawn_multi(fut: impl Future<Output = ()> + Send + 'static) {
     let task = Task(Box::into_raw(Box::new(Inner {
         ref_counter: AtomicUsize::new(1),
         id: TASK_ID.fetch_add(1, Relaxed),
@@ -61,3 +62,21 @@ pub fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
         WORKERS_ID.get().unwrap()[idx].assume_init_ref().unpark();
     }
 }
+
+/*struct JoinHandle<T>(Receiver<T>);
+
+fn spawn<T, F>(fut: F) -> JoinHandle<T> 
+where 
+F: Future<Output = T> + Send + 'static,
+T: Send + 'static,
+{
+    let (sender, receiver) = OneShot::<T>::new();
+    let ptr = Box::new(sender);
+    let task = Task(Box::into_raw(Box::new(Inner {
+        ref_counter: AtomicUsize::new(1),
+        id: TASK_ID.fetch_add(1, Relaxed),
+        state: AtomicU8::new(1),
+        future: UnsafeCell::new(Some(Box::pin(fut))),
+        
+    })));
+}*/

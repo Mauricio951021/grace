@@ -1,4 +1,4 @@
-use crate::ring::*;
+use crate::sync::ring::*;
 use crate::global::*;
 use crate::spawn::*;
 
