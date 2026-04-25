@@ -1,7 +1,7 @@
 use crate::task::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering::*, fence};
-use std::alloc::{alloc, Layout};
+use std::alloc::{Layout, alloc, handle_alloc_error};
 
 
 const DEFAULT_RING_CAP: usize = 4096;
@@ -45,7 +45,9 @@ impl RawSyncRing {
         assert!(cap.is_power_of_two());
         let layout = Layout::array::<Task>(cap).unwrap();
         let ptr = unsafe { alloc(layout) as *mut Task };
-        assert!(!ptr.is_null());
+        if ptr.is_null() {
+            handle_alloc_error(layout)
+        }
 
         RawSyncRing {
             ring_mask: cap - 1,

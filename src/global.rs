@@ -20,10 +20,15 @@ pub(crate) static GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE: AtomicU64 = AtomicU64::ne
 pub(crate) static TASK_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) static TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) static WORLD: MaybeUninit<World> = MaybeUninit::uninit();
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct World {
     pub(crate) data: *mut WorldData,
 }
+
+unsafe impl Send for World {}
+unsafe impl Sync for World {}
 
 impl Deref for World {
     type Target = WorldData;

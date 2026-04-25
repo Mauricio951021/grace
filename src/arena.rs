@@ -1,4 +1,4 @@
-use crate::task::*;
+
 
 
 use core::slice;
@@ -7,7 +7,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::*, fence};
 use std::ptr::dangling_mut;
 use std::{mem, u64, usize};
-
 
 
 const DEFAULT_ARENA_SLOTS: usize = 64;
@@ -126,13 +125,36 @@ impl ArenaInner {
 }
 
 
-pub(crate) struct ArenaBox<T> {
-    data: *mut T,
+pub(crate) struct ArenaBox<T: ?Sized> {
+    pub(crate) data: *mut T,
     drop_mask: u64,
     n_blocks: u8,
     slot_ptr: *const MCLock,
     is_heap: bool,
 }
+
+impl <T: ?Sized> ArenaBox<T> {
+    pub(crate) fn metadata(&self) -> Metadata {
+        Metadata {
+            drop_mask: self.drop_mask,
+            n_blocks: self.n_blocks,
+            slot_ptr: self.slot_ptr,
+            is_heap: self.is_heap,
+        }
+    }
+
+    pub(crate) fn from_raw(ptr: *mut T, data: Metadata) -> Self {
+        ArenaBox {
+            data: ptr,
+            drop_mask: data.drop_mask,
+            n_blocks: data.n_blocks,
+            slot_ptr: data.slot_ptr,
+            is_heap: data.is_heap,
+        }
+    }
+}
+
+
 
 unsafe impl<T: Send> Send for ArenaBox<T> {}
 unsafe impl<T: Sync> Sync for ArenaBox<T> {}
@@ -154,7 +176,7 @@ impl<T> DerefMut for ArenaBox<T> {
     }
 }
 
-impl<T> Drop for ArenaBox<T> {
+impl<T: ?Sized> Drop for ArenaBox<T> {
     fn drop(&mut self) {
         if self.is_heap {
             unsafe {
@@ -163,15 +185,23 @@ impl<T> Drop for ArenaBox<T> {
             }
         }
         unsafe {
-            drop(self.data.read());
+            self.data.drop_in_place();
         }
-        if size_of::<T>() == 0 {return;}
+        if self.n_blocks == 0 {return;}
         let mcl = unsafe {
             &(*self.slot_ptr)
         };
         mcl.bitmap.fetch_or(self.drop_mask, Release);
         mcl.cap.fetch_add(self.n_blocks, Release);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Metadata {
+    drop_mask: u64,
+    n_blocks: u8,
+    slot_ptr: *const MCLock,
+    is_heap: bool,
 }
 
 

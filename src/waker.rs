@@ -1,6 +1,8 @@
+use crate::arena::ArenaBox;
 use crate::task::*;
 use crate::global::*;
 
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{Ordering::*};
 use std::task::{RawWaker, RawWakerVTable};
 use std::mem;
@@ -12,23 +14,27 @@ impl VTable {
 
 
     pub(crate) fn clone(data: *const ()) -> RawWaker {
-        let task = Task(data as *const _);
+        let ptr = data as *mut TaskInner;
+        let metadata = unsafe {
+            (*ptr).metadata
+        };
+        let task = Task {
+            data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
+        };
         let clone = task.clone();
         mem::forget(task);
         mem::forget(clone);
-        RawWaker::new(
-            data,
-            &RawWakerVTable::new(
-                VTable::clone,
-                VTable::wake,
-                VTable::wake_by_ref,
-                VTable::drop,
-            ),
-        )
+        RawWaker::new(data,V_TABLE)
     }
 
     pub(crate) fn wake(data: *const ()) {
-        let task = Task(data as *const Inner);
+        let ptr = data as *mut TaskInner;
+        let metadata = unsafe {
+            (*ptr).metadata
+        };
+        let task = Task {
+            data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
+        };
         let ring = task.data().ring;
         let mut state = task.data().state.load(Relaxed);
         loop {
@@ -81,7 +87,13 @@ impl VTable {
     }
 
     pub(crate) fn wake_by_ref(data: *const ()) {
-        let task = Task(data as *const Inner);
+        let ptr = data as *mut TaskInner;
+        let metadata = unsafe {
+            (*ptr).metadata
+        };
+        let task = Task {
+            data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
+        };
         let ring = task.data().ring;
         let mut state = task.data().state.load(Relaxed);
         loop {
@@ -138,6 +150,12 @@ impl VTable {
     }
 
     pub (crate) fn drop(data: *const ()) {
-        Task(data as *const _);
+        let ptr = data as *mut TaskInner;
+        let metadata = unsafe {
+            (*ptr).metadata
+        };
+        let _ = Task {
+            data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
+        };
     }
 }

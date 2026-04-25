@@ -1,75 +1,62 @@
-use crate::sync::{ring::*, one_shot::*};
+use crate::sync::ring::*;
 use crate::waker::*;
 use crate::arena::*;
 
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::*, fence};
-use std::pin::Pin;
 use std::task::{RawWakerVTable, Waker, RawWaker};
 use std::cell::UnsafeCell;
-use std::mem;
+use std::mem::{self, ManuallyDrop};
 
 
 
 
-pub(crate) struct Task<F: Future<Output = T> + 'static, T: Send + 'static>(pub(crate) *const TaskInner<F, T>);
+pub(crate) struct Task {
+    pub(crate) data: ManuallyDrop<ArenaBox<TaskInner>>,
+}
 
-unsafe impl<F: Future<Output = T> + Send + 'static, T: Send + 'static> Send for Task<F, T> {}
-unsafe impl<F: Future<Output = T> + Sync + 'static, T: Send + 'static> Sync for Task<F, T> {}
+unsafe impl Send for Task {}
+unsafe impl Sync for Task {}
 
-impl<F, T> Clone for Task<F, T> 
-where 
-F: Future<Output = T> + 'static,
-T: Send + 'static,
-{
+impl Clone for Task {
     fn clone(&self) -> Self {
         if self.data().ref_counter.fetch_add(1, Relaxed) >= usize::MAX / 2 {
             std::process::abort();
         }
-        Task(self.data() as *const _)
-    }
-}
-
-impl<F, T> Drop for Task<F, T> 
-where 
-F: Future<Output = T> + 'static,
-T: Send + 'static,
-{
-    fn drop(&mut self) {
-        if self.data().ref_counter.fetch_sub(1, Relaxed) == 1 {
-            fence(Acquire);
-            unsafe {
-                let _ = Box::from_raw(self.0 as *mut TaskInner<F, T>);
+        unsafe {
+            Task {
+                data: ((&self.data) as *const ManuallyDrop<ArenaBox<TaskInner>>).read(),
             }
         }
     }
 }
 
-const V_TABLE: &RawWakerVTable = &RawWakerVTable::new(VTable::clone, VTable::wake, VTable::wake_by_ref, VTable::drop);
+impl Drop for Task {
+    fn drop(&mut self) {
+        if self.data().ref_counter.fetch_sub(1, Relaxed) == 1 {
+            fence(Acquire);
+            unsafe {
+                ManuallyDrop::drop(&mut self.data);
+            }
+        }
+    }
+}
 
-impl<F, T> Task<F, T> 
-where 
-F: Future<Output = T> + 'static,
-T: Send + 'static,
-{
+pub(crate) const V_TABLE: &RawWakerVTable = &RawWakerVTable::new(VTable::clone, VTable::wake, VTable::wake_by_ref, VTable::drop);
 
-    
-
-    pub(crate) fn data(&self) -> &TaskInner<F, T> 
-    where 
-    F: Future<Output = T>,
-    {
-        unsafe { &*self.0 }
+impl Task {
+    pub(crate) fn data(&self) -> &TaskInner {
+        &self.data
     }
 
-    pub(crate) fn get_future(&self) -> Option<ArenaBox<F>> {
+    pub(crate) fn get_future(&self) -> Option<ArenaBox<dyn Future<Output = ()>>> {
         unsafe { (*self.data().future.get()).take() }
     }
 
     pub(crate) fn waker(&self) -> Waker {
         let clon = self.clone();
         mem::forget(clon);
-        let data = self.0 as *const ();
+        let data = self.data.data as *const ();
         let vtable = V_TABLE;
         let raw_waker = RawWaker::new(data, vtable);
         unsafe { Waker::from_raw(raw_waker) }
@@ -77,18 +64,14 @@ T: Send + 'static,
 }
 
 
-pub(crate) struct TaskInner<F, T> 
-where 
-F: Future<Output = T> + 'static,
-T: Send + 'static,
-{
+pub(crate) struct TaskInner {
     pub(crate) ref_counter: AtomicUsize,
     pub(crate) id: u64,
     //primer bit = en ejecucion, segundo bit = notificacion para volver a ejecutar.
     pub(crate) state: AtomicU8,
-    pub(crate) future: UnsafeCell<Option<ArenaBox<F>>>,
-    pub(crate) sender: Sender<T>,
+    pub(crate) future: UnsafeCell<Option<ArenaBox<dyn Future<Output = ()>>>>,
     pub(crate) ring: SyncRing,
     pub(crate) multi_thread: u8,
+    pub(crate) metadata: Metadata,
 }
 

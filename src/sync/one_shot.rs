@@ -28,6 +28,7 @@ const WAKER_READY: u8 = 8;
 const TERMINATED: u8 = 16;
 
 
+
 impl<T> OneShot<T> {
     pub fn new() -> (Sender<T>, Receiver<T>)
     where 
@@ -66,13 +67,54 @@ T: Send + 'static,
                 (*self.channel).message.write(msg);
             }
             state = channel.state.fetch_or(MESSAGE_READY, Release);
-            if (state & WAKER_READY) == WAKER_READY {
-                channel.state.fetch_and(!WAKER_READY, Acquire);
-                unsafe {
-                    (*self.channel).waker.assume_init_read().wake();
-                }   
+            loop {
+                if (state & WAKER_READY) == WAKER_READY {  
+                    match channel.state.compare_exchange(state, state & (!WAKER_READY), Acquire, Relaxed) {
+                        Ok(_) => {
+                            unsafe {
+                                (*self.channel).waker.assume_init_read().wake();
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            state = e;
+                            continue;
+                        }
+                    }
+                }
+                return;   
             }
         }
+    }
+    //internal use only
+    pub(crate) fn internal_send(&self, msg: T) {
+        let channel = unsafe {
+            &*self.channel
+        };
+        let mut state = channel.state.load(Relaxed);
+        if (state & RECEIVER) == RECEIVER {
+            unsafe {
+                (*self.channel).message.write(msg);
+            }
+            state = channel.state.fetch_or(MESSAGE_READY, Release);
+            loop {
+                if (state & WAKER_READY) == WAKER_READY {  
+                    match channel.state.compare_exchange(state, state & (!WAKER_READY), Acquire, Relaxed) {
+                        Ok(_) => {
+                            unsafe {
+                                (*self.channel).waker.assume_init_read().wake();
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            state = e;
+                            continue;
+                        }
+                    }
+                }
+                return;   
+            }
+        }  
     }
 }
 
@@ -156,8 +198,6 @@ impl<T> Future for Receiver<T> {
                     }
                 }
             } else {
-                //Here i put true because Sender::send already write the message and turn off WAKER_READY and consume the Waker
-                //actually will be the same true or false
                 true
             }
         } else {
@@ -255,3 +295,4 @@ impl<T> Drop for Receiver<T> {
         }
     }
 }
+
