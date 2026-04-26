@@ -4,9 +4,11 @@
 use core::slice;
 use std::alloc::{Layout, alloc, handle_alloc_error};
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::*, fence};
 use std::ptr::dangling_mut;
 use std::{mem, u64, usize};
+use std::task::{Context, Poll};
 
 
 const DEFAULT_ARENA_SLOTS: usize = 64;
@@ -159,7 +161,16 @@ impl <T: ?Sized> ArenaBox<T> {
 unsafe impl<T: Send> Send for ArenaBox<T> {}
 unsafe impl<T: Sync> Sync for ArenaBox<T> {}
 
-impl<T> Deref for ArenaBox<T> {
+impl<T: Future> Future for ArenaBox<T> {
+    type Output = T::Output;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe {
+            Pin::new_unchecked(&mut *self.data).poll(cx)
+        }
+    }
+}
+
+impl<T: ?Sized> Deref for ArenaBox<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe {
@@ -168,7 +179,7 @@ impl<T> Deref for ArenaBox<T> {
     }
 }
 
-impl<T> DerefMut for ArenaBox<T> {
+impl<T: ?Sized> DerefMut for ArenaBox<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
             &mut *self.data

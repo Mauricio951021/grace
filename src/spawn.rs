@@ -1,15 +1,15 @@
 use crate::global::*;
 use crate::task::*;
 use crate::sync::one_shot::*;
+use crate::arena::*;
 
 
 use std::any::Any;
-use std::error::Error;
+use std::mem::{self, ManuallyDrop};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicUsize, AtomicU8, Ordering::*};
 use std::cell::UnsafeCell;
-use std::thread;
 use std::pin::Pin;
 
 
@@ -43,38 +43,10 @@ pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
     CURRENT_ID.get().unwrap().unpark();
 }
 */
-pub fn spawn_multi(fut: impl Future<Output = ()> + Send + 'static) {
-    let task = Task(Box::into_raw(Box::new(Inner {
-        ref_counter: AtomicUsize::new(1),
-        id: TASK_ID.fetch_add(1, Relaxed),
-        state: AtomicU8::new(1),
-        future: UnsafeCell::new(Some(Box::pin(fut))),
-        ring: *MULTI.get().unwrap(),
-        multi_thread: 1,
-    })));
-    MULTI.get().unwrap().inner().push_back(task);
-    TASK_COUNTER.fetch_add(1, Relaxed);
-    let order = GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE.fetch_add(1, Relaxed);
-    let map = WORKERS_BITMAP.load(Relaxed);
-    if map == 0 {
-        return;
-    }
-    let idx = if (order & 1) == 0 {
-        map.trailing_zeros() as usize
-    } else {
-        (63 - map.leading_zeros()) as usize
-    };
-    WORKERS_BITMAP.fetch_and(!(1 << idx), Relaxed);
-    unsafe {
-        WORKERS_ID.get().unwrap()[idx].assume_init_ref().unpark();
-    }
-}
-
-
 
 struct JoinHandle<T>(Receiver<Result<T, Box<dyn Any + Send + 'static>>>);
 
-fn spawn<F, T>(fut: F) -> JoinHandle<T> 
+pub fn spawn<F, T>(fut: F) -> JoinHandle<T> 
 where 
 F: Future<Output = T> + Send + 'static,
 T: Send + 'static,
@@ -84,16 +56,50 @@ T: Send + 'static,
     };
     let number = world.global_counter_for_alternative_wake.load(Relaxed);
     let (sender, receiver) = OneShot::new();
-    let future = UnsafeCell::new(Some(world.arena.arena_alloc(number as usize, TaskFuture {
-        fut,
+    let fut = TaskFuture {
         sender,
-    })));
+        fut,
+    };
+    let arena_box = world.arena.arena_alloc(number as usize, fut);
+    let ptr = arena_box.data as *mut dyn Future<Output = ()>;
+    let metadata = arena_box.metadata();
+    let future = unsafe {
+            UnsafeCell::new(Some(
+            Pin::new_unchecked(ArenaBox::from_raw(ptr, metadata))
+    ))};
+    mem::forget(arena_box);
+    
+    let mut task = Task {
+        data: ManuallyDrop::new(world.arena.arena_alloc(number as usize, TaskInner {
+            ref_counter: AtomicUsize::new(1),
+            id: world.task_id.fetch_add(1, Relaxed),
+            state: AtomicU8::new(1),
+            future,
+            ring: world.multi_thread_ring,
+            multi_thread: 1,
+            task_ptr_metadata: unsafe {mem::zeroed()},
+        })),
+    };
+    task.data.task_ptr_metadata = task.data.metadata();
+    world.task_counter.fetch_add(1, Relaxed);
+    world.multi_thread_ring.inner().push_back(task);
+    let map = world.workers_bitmap.load(Relaxed);
+    if map == 0 {
+        return JoinHandle(receiver);
+    }
+    let idx = if (number & 1) == 0 {
+        map.trailing_zeros() as usize
+    } else {
+        (63 - map.leading_zeros()) as usize
+    };
+    world.workers_bitmap.fetch_and(!(1 << idx), Relaxed);
+    world.workers_id[idx].unpark();
     JoinHandle(receiver)
 }
 
 struct TaskFuture<F, T> {
-    fut: F,
     sender: Sender<Result<T, Box<dyn Any + Send + 'static>>>,
+    fut: F,
 }
 
 

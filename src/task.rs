@@ -3,6 +3,7 @@ use crate::waker::*;
 use crate::arena::*;
 
 
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::*, fence};
 use std::task::{RawWakerVTable, Waker, RawWaker};
 use std::cell::UnsafeCell;
@@ -49,8 +50,20 @@ impl Task {
         &self.data
     }
 
-    pub(crate) fn get_future(&self) -> Option<ArenaBox<dyn Future<Output = ()>>> {
-        unsafe { (*self.data().future.get()).take() }
+    pub(crate) fn get_future(&self) -> Option<impl Future> {
+        unsafe {
+            if let Some(f) = (*self.data().future.get()).take() {
+                Some(f)
+            } else {
+                None
+            }
+        }
+    }
+
+    pub(crate) fn put_future(&self, f: Pin<ArenaBox<dyn Future<Output = ()> + 'static>>) {
+        unsafe {
+            (*self.data().future.get()) = Some(f);
+        }
     }
 
     pub(crate) fn waker(&self) -> Waker {
@@ -69,9 +82,9 @@ pub(crate) struct TaskInner {
     pub(crate) id: u64,
     //primer bit = en ejecucion, segundo bit = notificacion para volver a ejecutar.
     pub(crate) state: AtomicU8,
-    pub(crate) future: UnsafeCell<Option<ArenaBox<dyn Future<Output = ()>>>>,
+    pub(crate) future: UnsafeCell<Option<Pin<ArenaBox<dyn Future<Output = ()>>>>>,
     pub(crate) ring: SyncRing,
     pub(crate) multi_thread: u8,
-    pub(crate) metadata: Metadata,
+    pub(crate) task_ptr_metadata: Metadata,
 }
 

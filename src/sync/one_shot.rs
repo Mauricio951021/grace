@@ -46,6 +46,7 @@ impl<T> OneShot<T> {
     }
 }
 
+#[repr(transparent)]
 pub struct Sender<T> {
     channel: *mut OneShot<T>,
 }

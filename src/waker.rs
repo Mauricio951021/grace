@@ -4,7 +4,7 @@ use crate::global::*;
 
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{Ordering::*};
-use std::task::{RawWaker, RawWakerVTable};
+use std::task::RawWaker;
 use std::mem;
 
 
@@ -16,7 +16,7 @@ impl VTable {
     pub(crate) fn clone(data: *const ()) -> RawWaker {
         let ptr = data as *mut TaskInner;
         let metadata = unsafe {
-            (*ptr).metadata
+            (*ptr).task_ptr_metadata
         };
         let task = Task {
             data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
@@ -30,7 +30,7 @@ impl VTable {
     pub(crate) fn wake(data: *const ()) {
         let ptr = data as *mut TaskInner;
         let metadata = unsafe {
-            (*ptr).metadata
+            (*ptr).task_ptr_metadata
         };
         let task = Task {
             data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
@@ -64,11 +64,14 @@ impl VTable {
                 }
             }
         }
+        let world = unsafe {
+            WORLD.assume_init_ref()
+        };
         let is_multi = task.data().multi_thread;
         ring.inner().push_back(task);
         if is_multi == 1 {
-            let order = GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE.fetch_add(1, Relaxed);
-            let map = WORKERS_BITMAP.load(Relaxed);
+            let order = world.global_counter_for_alternative_wake.fetch_add(1, Relaxed);
+            let map = world.workers_bitmap.load(Relaxed);
             if map == 0 {
                 return;
             }
@@ -77,19 +80,17 @@ impl VTable {
             } else {
                 (63 - map.leading_zeros()) as usize
             };
-            WORKERS_BITMAP.fetch_and(!(1 << idx), Relaxed);
-            unsafe {
-                WORKERS_ID.get().unwrap()[idx].assume_init_ref().unpark();
-            }
+            world.workers_bitmap.fetch_and(!(1 << idx), Relaxed);
+            world.workers_id[idx].unpark();
         } else {
-            CURRENT_ID.get().unwrap().unpark();
+            world.main_id.unpark();
         }
     }
 
     pub(crate) fn wake_by_ref(data: *const ()) {
         let ptr = data as *mut TaskInner;
         let metadata = unsafe {
-            (*ptr).metadata
+            (*ptr).task_ptr_metadata
         };
         let task = Task {
             data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
@@ -126,12 +127,15 @@ impl VTable {
                 }
             }
         }
+        let world = unsafe {
+            WORLD.assume_init_ref()
+        };
         let is_multi = task.data().multi_thread;
         ring.inner().push_back(task.clone());
         mem::forget(task);
         if is_multi == 1 {
-            let order = GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE.fetch_add(1, Relaxed);
-            let map = WORKERS_BITMAP.load(Relaxed);
+            let order = world.global_counter_for_alternative_wake.fetch_add(1, Relaxed);
+            let map = world.workers_bitmap.load(Relaxed);
             if map == 0 {
                 return;
             }
@@ -140,19 +144,17 @@ impl VTable {
             } else {
                 (63 - map.leading_zeros()) as usize
             };
-            WORKERS_BITMAP.fetch_and(!(1 << idx), Relaxed);
-            unsafe {
-                WORKERS_ID.get().unwrap()[idx].assume_init_ref().unpark();
-            }
+            world.workers_bitmap.fetch_and(!(1 << idx), Relaxed);
+            world.workers_id[idx].unpark();
         } else {
-            CURRENT_ID.get().unwrap().unpark();
+            world.main_id.unpark();
         }
     }
 
     pub (crate) fn drop(data: *const ()) {
         let ptr = data as *mut TaskInner;
         let metadata = unsafe {
-            (*ptr).metadata
+            (*ptr).task_ptr_metadata
         };
         let _ = Task {
             data: ManuallyDrop::new(ArenaBox::from_raw(ptr, metadata))
