@@ -1,26 +1,14 @@
 use crate::sync::ring::*;
 use crate::arena::*;
 
-use std::sync::atomic::{AtomicU64, AtomicU8};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::thread::Thread;
 use std::mem::MaybeUninit;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
-
-
-
-pub(crate) static CURRENT: OnceLock<SyncRing> = OnceLock::new();
-pub(crate) static CURRENT_ID: OnceLock<Thread> = OnceLock::new();
-pub(crate) static MULTI: OnceLock<SyncRing> = OnceLock::new();
-pub(crate) static WORKERS_BITMAP: AtomicU64 = AtomicU64::new(0);
-pub(crate) static WORKERS_ID: OnceLock<Vec<MaybeUninit<Thread>>> = OnceLock::new();
-pub(crate) static READY: AtomicU64 = AtomicU64::new(0);
-pub(crate) static GLOBAL_COUNTER_FOR_ALTERNATIVE_WAKE: AtomicU64 = AtomicU64::new(1);
-pub(crate) static TASK_ID: AtomicU64 = AtomicU64::new(0);
-pub(crate) static TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) static WORLD: MaybeUninit<World> = MaybeUninit::uninit();
+pub(crate) static WORLD_READY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct World {
@@ -39,6 +27,14 @@ impl Deref for World {
     }
 }
 
+impl DerefMut for World {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            &mut*self.data
+        }
+    }
+}
+
 pub(crate) struct WorldData {
     pub(crate) single_thread_ring: SyncRing,
     pub(crate) main_id: Thread,
@@ -49,8 +45,6 @@ pub(crate) struct WorldData {
     pub(crate) task_id: Aligned<AtomicU64>,
     pub(crate) task_counter: Aligned<AtomicU64>,
     pub(crate) arena: Arena,
-    pub(crate) world_ready: AtomicU8,
-    reserv: [u8; 128],
 }
 
 impl World {
@@ -65,15 +59,13 @@ impl World {
             task_id: Aligned(AtomicU64::new(0)),
             task_counter: Aligned(AtomicU64::new(0)),
             arena: Arena::new(arena_s),
-            world_ready: AtomicU8::new(0),
-            reserv: [0; 128],
         };
         Self { data: Box::into_raw(Box::new(data)) }
     } 
 }
 
 #[repr(align(64))]
-struct Aligned<T>(T);
+pub(crate) struct Aligned<T>(T);
 
 impl<T> Deref for Aligned<T>  {
     type Target = T;

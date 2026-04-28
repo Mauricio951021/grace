@@ -11,23 +11,39 @@ use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicUsize, AtomicU8, Ordering::*};
 use std::cell::UnsafeCell;
 use std::pin::Pin;
+use std::u8;
 
 
-/* 
+
 pub(crate) fn spawn_root_task(fut: impl Future<Output = ()> + 'static) {
-    let task = Task(Box::into_raw(Box::new(Inner {
+    let world = unsafe {
+        WORLD.assume_init_ref()
+    };
+    let number = world.global_counter_for_alternative_wake.load(Relaxed);
+    let arena_box = world.arena.arena_alloc(number as usize, fut);
+    let future = unsafe {
+        UnsafeCell::new(Some(Pin::new_unchecked(ArenaBox::from_raw(arena_box.data as *mut dyn Future<Output = ()>,
+        arena_box.metadata()))
+    ))};
+    mem::forget(arena_box);
+    let mut task_inner = world.arena.arena_alloc(number as usize, TaskInner {
         ref_counter: AtomicUsize::new(1),
-        id: TASK_ID.fetch_add(1, Relaxed),
+        id: world.task_id.fetch_add(1, Relaxed),
         state: AtomicU8::new(1),
-        future: UnsafeCell::new(Some(Box::pin(fut))),
-        ring: *CURRENT.get().unwrap(),
+        future,
+        ring: world.single_thread_ring,
         multi_thread: u8::MAX,
-    })));
-    TASK_COUNTER.fetch_add(1, Relaxed);
-    CURRENT.get().unwrap().inner().push_back(task);
-    CURRENT_ID.get().unwrap().unpark();
+        task_ptr_metadata: unsafe {mem::zeroed()},
+    });
+    task_inner.task_ptr_metadata = task_inner.metadata();
+    let task = Task {
+        data: ManuallyDrop::new(task_inner)
+    };
+    world.task_counter.fetch_add(1, Relaxed);
+    world.single_thread_ring.inner().push_back(task);
 }
 
+/* 
 pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
     assert!(thread::current().id() == CURRENT_ID.get().unwrap().id());
     let task = Task(Box::into_raw(Box::new(Inner {
@@ -44,7 +60,28 @@ pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
 }
 */
 
-struct JoinHandle<T>(Receiver<Result<T, Box<dyn Any + Send + 'static>>>);
+pub struct JoinHandle<T>(Receiver<Result<T, Box<dyn Any + Send + 'static>>>);
+
+impl<T> Future for JoinHandle<T> 
+where 
+T: Send + 'static,
+{
+type Output = Result<T, Box<dyn Any + Send + 'static>>;
+fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    let project = unsafe {
+        Pin::new_unchecked(&mut self.get_unchecked_mut().0)
+    };
+    match project.poll(cx) {
+        Poll::Ready(result) => {
+            match result {
+                Ok(ok) => Poll::Ready(ok),
+                Err(_) => Poll::Ready(Err(Box::new(()))),
+            }
+        }
+        Poll::Pending => Poll::Pending,
+    }
+}
+}
 
 pub fn spawn<F, T>(fut: F) -> JoinHandle<T> 
 where 

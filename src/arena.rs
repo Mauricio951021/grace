@@ -11,7 +11,7 @@ use std::{mem, u64, usize};
 use std::task::{Context, Poll};
 
 
-const DEFAULT_ARENA_SLOTS: usize = 64;
+pub(crate) const DEFAULT_ARENA_SLOTS: usize = 64;
 
 const BLOCK_SIZE: usize = 64;
 
@@ -21,7 +21,6 @@ pub(crate) struct Arena {
     ptr: *mut ArenaInner,
 }
 
-//helpers
 impl Arena {
     pub(crate) fn new(mut n: usize) -> Self {
         if n == 0 {

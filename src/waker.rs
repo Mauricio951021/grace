@@ -54,7 +54,7 @@ impl VTable {
                 match task
                     .data()
                     .state
-                    .compare_exchange(state, 1, Relaxed, Relaxed)
+                    .compare_exchange(state, 1, Acquire, Relaxed)
                 {
                     Ok(_) => break,
                     Err(e) => {
@@ -117,7 +117,7 @@ impl VTable {
                 match task
                     .data()
                     .state
-                    .compare_exchange(state, 1, Relaxed, Relaxed)
+                    .compare_exchange(state, 1, Acquire, Relaxed)
                 {
                     Ok(_) => break,
                     Err(e) => {

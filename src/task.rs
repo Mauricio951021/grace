@@ -50,7 +50,7 @@ impl Task {
         &self.data
     }
 
-    pub(crate) fn get_future(&self) -> Option<impl Future> {
+    pub(crate) fn get_future(&self) -> Option<Pin<ArenaBox<dyn Future<Output = ()>>>> {
         unsafe {
             if let Some(f) = (*self.data().future.get()).take() {
                 Some(f)
@@ -79,6 +79,7 @@ impl Task {
 
 pub(crate) struct TaskInner {
     pub(crate) ref_counter: AtomicUsize,
+    #[allow(dead_code)]
     pub(crate) id: u64,
     //primer bit = en ejecucion, segundo bit = notificacion para volver a ejecutar.
     pub(crate) state: AtomicU8,
