@@ -1,4 +1,5 @@
 use crate::task::*;
+use crate::global::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering::*, fence};
 use std::alloc::{Layout, alloc, handle_alloc_error};
@@ -33,7 +34,7 @@ pub(crate) struct RawSyncRing {
     pub(crate) head: AtomicUsize,
     pub(crate) multi_thread_head: AtomicUsize,
     pub(crate) writers_tail: AtomicUsize,
-    pub(crate) rt_tail: AtomicUsize,
+    pub(crate) tail: AtomicUsize,
 }
 unsafe impl Send for RawSyncRing {}
 unsafe impl Sync for RawSyncRing {}
@@ -55,7 +56,7 @@ impl RawSyncRing {
             head: AtomicUsize::new(0),
             multi_thread_head: AtomicUsize::new(0),
             writers_tail: AtomicUsize::new(0),
-            rt_tail: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
         }
     }
 
@@ -81,15 +82,15 @@ impl RawSyncRing {
         unsafe {
             self.ptr.add(tail & self.ring_mask).write(t);
         }
-        while tail != self.rt_tail.load(Relaxed) {
+        while tail != self.tail.load(Relaxed) {
             std::hint::spin_loop();
         }
-        self.rt_tail.store(tail.wrapping_add(1), Release);
+        self.tail.store(tail.wrapping_add(1), Release);
     }
 
     pub(crate) fn consume(&self) -> Option<Task> {
         let head = self.head.load(Relaxed);
-        if head == self.rt_tail.load(Acquire) {
+        if head == self.tail.load(Acquire) {
             return None;
         }
         let res = unsafe { Some(self.ptr.add(head & self.ring_mask).read()) };
@@ -100,7 +101,7 @@ impl RawSyncRing {
     pub(crate) fn multithread_consume(&self) -> Option<Task> {
         let mut multithread_head = self.multi_thread_head.load(Relaxed);
         loop {
-            if multithread_head == self.rt_tail.load(Relaxed) {
+            if multithread_head == self.tail.load(Relaxed) {
                 return None;
             }
             fence(Acquire);
@@ -123,5 +124,44 @@ impl RawSyncRing {
         }
         self.head.store(multithread_head.wrapping_add(1), Release);
         res
+    }
+
+    pub(crate) fn try_push_with_fallback(&self, t: Task) -> Option<()>{
+        let sender = unsafe {
+            &WORLD.assume_init_ref().task_buff_overflow_manager
+        };
+        let mut spin_loop_counter = 0u8;
+        let mut tail = self.writers_tail.load(Relaxed);
+        loop {
+            if spin_loop_counter == 3 {
+                let _ = sender.send(t);
+                return None;
+            }
+            if tail.wrapping_sub(self.head.load(Acquire)) >= self.ring_mask + 1 {
+                std::hint::spin_loop();
+                tail = self.writers_tail.load(Relaxed);
+                spin_loop_counter += 1;
+                continue;
+            }
+            match self
+                .writers_tail
+                .compare_exchange(tail, tail.wrapping_add(1), Relaxed, Relaxed)
+            {
+                Ok(_) => break,
+                Err(e) => {
+                    spin_loop_counter += 1;
+                    tail = e;
+                    continue;
+                }
+            }
+        }
+        unsafe {
+            self.ptr.add(tail & self.ring_mask).write(t);
+        }
+        while tail != self.tail.load(Relaxed) {
+            std::hint::spin_loop();
+        }
+        self.tail.store(tail.wrapping_add(1), Release);
+        Some(())
     }
 }

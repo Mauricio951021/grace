@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicUsize, AtomicU8, Ordering::*};
 use std::cell::UnsafeCell;
 use std::pin::Pin;
+use std::thread;
 use std::u8;
 
 
@@ -43,24 +44,16 @@ pub(crate) fn spawn_root_task(fut: impl Future<Output = ()> + 'static) {
     world.single_thread_ring.inner().push_back(task);
 }
 
-/* 
-pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
-    assert!(thread::current().id() == CURRENT_ID.get().unwrap().id());
-    let task = Task(Box::into_raw(Box::new(Inner {
-        ref_counter: AtomicUsize::new(1),
-        id: TASK_ID.fetch_add(1, Relaxed),
-        state: AtomicU8::new(1),
-        future: UnsafeCell::new(Some(Box::pin(fut))),
-        ring: *CURRENT.get().unwrap(),
-        multi_thread: 0,
-    })));
-    TASK_COUNTER.fetch_add(1, Relaxed);
-    CURRENT.get().unwrap().inner().push_back(task);
-    CURRENT_ID.get().unwrap().unpark();
+ 
+pub fn spawn_local(_fut: impl Future<Output = ()> + 'static) {
+    let world = unsafe {
+        WORLD.assume_init_ref()
+    };
+    assert_eq!(thread::current().id(), world.main_id.id(), "solo en root task");
+    todo!()
 }
-*/
 
-pub struct JoinHandle<T>(Receiver<Result<T, Box<dyn Any + Send + 'static>>>);
+pub struct JoinHandle<T>(InternalReceiver<Result<T, Box<dyn Any + Send + 'static>>>);
 
 impl<T> Future for JoinHandle<T> 
 where 
@@ -92,7 +85,7 @@ T: Send + 'static,
         WORLD.assume_init_ref()
     };
     let number = world.global_counter_for_alternative_wake.load(Relaxed);
-    let (sender, receiver) = OneShot::new();
+    let (sender, receiver) = InternalOneshot::new(number as usize);
     let fut = TaskFuture {
         sender,
         fut,
@@ -135,7 +128,7 @@ T: Send + 'static,
 }
 
 struct TaskFuture<F, T> {
-    sender: Sender<Result<T, Box<dyn Any + Send + 'static>>>,
+    sender: InternalSender<Result<T, Box<dyn Any + Send + 'static>>>,
     fut: F,
 }
 
@@ -156,14 +149,14 @@ T: Send + 'static,
             Ok(ok) => {
                 match ok {
                     Poll::Ready(result) => {
-                        self.sender.internal_send(Ok(result));
+                        self.sender.send(Ok(result));
                         Poll::Ready(())
                     }
                     Poll::Pending => Poll::Pending,
                 }
             }
             Err(e) => {
-                self.sender.internal_send(Err(e));
+                self.sender.send(Err(e));
                 Poll::Ready(())
             }
         }

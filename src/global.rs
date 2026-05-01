@@ -1,14 +1,15 @@
 use crate::sync::ring::*;
 use crate::arena::*;
+use crate::task::Task;
 
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::thread::Thread;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
+use std::sync::mpsc::Sender;
 
 
 pub(crate) static WORLD: MaybeUninit<World> = MaybeUninit::uninit();
-pub(crate) static WORLD_READY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct World {
@@ -45,10 +46,11 @@ pub(crate) struct WorldData {
     pub(crate) task_id: Aligned<AtomicU64>,
     pub(crate) task_counter: Aligned<AtomicU64>,
     pub(crate) arena: Arena,
+    pub(crate) task_buff_overflow_manager: Sender<Task>,
 }
 
 impl World {
-    pub(crate) fn new(single_ring_s: usize, main_id: Thread, multi_ring_s: usize, arena_s: usize) -> Self {
+    pub(crate) fn new(single_ring_s: usize, main_id: Thread, multi_ring_s: usize, arena_s: usize, sender: Sender<Task>) -> Self {
         let data = WorldData {
             single_thread_ring: SyncRing::new(single_ring_s),
             main_id,
@@ -59,6 +61,7 @@ impl World {
             task_id: Aligned(AtomicU64::new(0)),
             task_counter: Aligned(AtomicU64::new(0)),
             arena: Arena::new(arena_s),
+            task_buff_overflow_manager: sender,
         };
         Self { data: Box::into_raw(Box::new(data)) }
     } 

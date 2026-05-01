@@ -1,14 +1,16 @@
 use crate::global::*;
 use crate::spawn::*;
 use crate::config::*;
+use crate::task::Task;
 
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{Ordering::*, fence};
 use std::sync::Arc;
 use std::thread::{self, Thread, Builder};
 use std::task::Context;
-use std::u64;
+use std::sync::mpsc::{self, Sender, Receiver};
 
 
 pub struct RT {
@@ -18,11 +20,15 @@ pub struct RT {
 
 impl RT {
     pub(crate) fn new(mut config: GraceConfig) -> Self {
+        let world_ready = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        ring_overflow_handler(world_ready.clone(), receiver);
         let mut world = World::new(
         config.local_task_buffer_size,
             thread::current(),
             config.worker_task_buffer_size,
-            config.arena_slots);
+            config.arena_slots,
+        sender);
         assert!(config.worker_count != 0, "No pueden haber 0 workers");
         if config.worker_count >= 64 {
             config.worker_count = 64;
@@ -37,9 +43,11 @@ impl RT {
         let workers_id = Arc::new(workers_id);
         let ready = Arc::new(AtomicU8::new(0));
         
+        
         for i in 0..config.worker_count {
             let workers_id_clon = workers_id.clone();
             let ready_clon = ready.clone();
+            let world_ready_clon = world_ready.clone();
             let builder = Builder::new().stack_size(config.worker_stack_size).name(format!("worker-{}", i + 1));
             let _ = builder.spawn(move || {
                 let worker_idx = i;
@@ -50,9 +58,10 @@ impl RT {
                 }
                 ready_clon.fetch_add(1, Release);
                 drop(ready_clon);
-                while !WORLD_READY.load(Acquire) {
+                while !world_ready_clon.load(Acquire) {
                     std::hint::spin_loop();
                 }
+                drop(world_ready_clon);
                 let world = unsafe {
                     WORLD.assume_init_ref()
                 };
@@ -115,7 +124,7 @@ impl RT {
         unsafe {
             (WORLD.as_ptr() as *mut World).write(world);
         }
-        WORLD_READY.store(true, Release);
+        world_ready.store(true, Release);
 
         RT { marker: PhantomData }
     }
@@ -154,3 +163,17 @@ impl RT {
     }
 }
 
+fn ring_overflow_handler(ready: Arc<AtomicBool>, receiver: Receiver<Task>) {
+    thread::spawn(move|| {
+        while !ready.load(Relaxed) {
+            std::hint::spin_loop();
+        }
+        drop(ready);
+        let world = unsafe {
+            WORLD.assume_init_ref()
+        };
+        while let Ok(t) = receiver.recv() {
+            
+        }
+    });
+}

@@ -68,22 +68,26 @@ impl VTable {
             WORLD.assume_init_ref()
         };
         let is_multi = task.data().multi_thread;
-        ring.inner().push_back(task);
-        if is_multi == 1 {
-            let order = world.global_counter_for_alternative_wake.fetch_add(1, Relaxed);
-            let map = world.workers_bitmap.load(Relaxed);
-            if map == 0 {
-                return;
+        match ring.inner().try_push_with_fallback(task) {
+            Some(_) => {
+                if is_multi == 1 {
+                    let order = world.global_counter_for_alternative_wake.fetch_add(1, Relaxed);
+                    let map = world.workers_bitmap.load(Relaxed);
+                    if map == 0 {
+                        return;
+                    }
+                    let idx = if (order & 1) == 0 {
+                    map.trailing_zeros() as usize
+                    } else {
+                    (63 - map.leading_zeros()) as usize
+                    };
+                    world.workers_bitmap.fetch_and(!(1 << idx), Relaxed);
+                    world.workers_id[idx].unpark();
+                } else {
+                    world.main_id.unpark();
+                }
             }
-            let idx = if (order & 1) == 0 {
-                map.trailing_zeros() as usize
-            } else {
-                (63 - map.leading_zeros()) as usize
-            };
-            world.workers_bitmap.fetch_and(!(1 << idx), Relaxed);
-            world.workers_id[idx].unpark();
-        } else {
-            world.main_id.unpark();
+            None => {}
         }
     }
 

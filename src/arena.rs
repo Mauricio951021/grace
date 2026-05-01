@@ -309,9 +309,7 @@ impl Arena {
 
 
 //los bit en 1 significan bloques librea
-//esta funcion es solo un helper y depende de la correccion de quien la llama 
 //esta funcion devuelve el indice donde empiezan n_blocks contiguos libres o None
-//OOOOOJOOOO La correcion de datos validos es garantizada por quien llama a esta funcion OjO
 fn find_blocks(mut map: u64, n_blocks: u8, align: usize) -> Option<usize> {
     //quien llama ya verifico capacidad sufiente y este es el caso maximo asi que el slot esta vacio
     if n_blocks == 64 {

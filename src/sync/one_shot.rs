@@ -1,19 +1,13 @@
+use crate::arena::*;
+use crate::global::WORLD;
 
 
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicU8, Ordering::*, fence};
 
-
-
-
-
-pub struct OneShot<T> {
-    state: AtomicU8,
-    message: MaybeUninit<T>,
-    waker: MaybeUninit<Waker>,
-}
 
 // the sender is alive
 const SENDER: u8 = 1;
@@ -27,55 +21,62 @@ const WAKER_READY: u8 = 8;
 
 const TERMINATED: u8 = 16;
 
+pub(crate) struct InternalSender<T> {
+    channel: UnsafeCell<ManuallyDrop<ArenaBox<InternalOneshot<T>>>>,
+}
+unsafe impl<T: Send> Send for InternalSender<T> {}
+unsafe impl<T: Sync> Sync for InternalSender<T> {}
 
+pub(crate) struct InternalReceiver<T> {
+    channel: UnsafeCell<ManuallyDrop<ArenaBox<InternalOneshot<T>>>>,
+}
+unsafe impl<T: Send> Send for InternalReceiver<T> {}
+unsafe impl<T: Sync> Sync for InternalReceiver<T> {}
 
-impl<T> OneShot<T> {
-    pub fn new() -> (Sender<T>, Receiver<T>)
-    where 
-    T: Send + 'static,
-    {
-        let msg = OneShot {
-            state: AtomicU8::new(SENDER | RECEIVER),
-            message: MaybeUninit::uninit(),
-            waker: MaybeUninit::uninit(),
+pub(crate) struct InternalOneshot<T> {
+    state: AtomicU8,
+    message: UnsafeCell<MaybeUninit<T>>,
+    waker: UnsafeCell<MaybeUninit<Waker>>,
+}
+
+unsafe impl<T: Send> Send for InternalOneshot<T> {}
+unsafe impl<T: Sync> Sync for InternalOneshot<T> {}
+
+impl<T> InternalOneshot<T> {
+    pub(crate) fn new(rand_idx: usize) -> (InternalSender<T>, InternalReceiver<T>) {
+        let arena = unsafe {
+            &WORLD.assume_init_ref().arena
         };
-        let channel = Box::into_raw(Box::new(msg));
-        let sender = Sender {channel};
-        let receiver = Receiver {channel};
-        (sender, receiver)
+        let channel = InternalOneshot {
+            state: AtomicU8::new(SENDER | RECEIVER),
+            message: UnsafeCell::new(MaybeUninit::uninit()),
+            waker: UnsafeCell::new(MaybeUninit::uninit()),
+        };
+        let ptr1 = arena.arena_alloc(rand_idx, channel);
+        let ptr2 = UnsafeCell::new(ManuallyDrop::new(ArenaBox::from_raw(ptr1.data, ptr1.metadata())));
+        (InternalSender {channel: UnsafeCell::new(ManuallyDrop::new(ptr1))}, InternalReceiver {channel: ptr2})
     }
 }
 
-#[repr(transparent)]
-pub struct Sender<T> {
-    channel: *mut OneShot<T>,
-}
-
-unsafe impl<T: Send> Send for Sender<T> {}
-
-
-impl<T> Sender<T> 
-where 
-T: Send + 'static,
-{
-    pub fn send(self, msg: T) {
+impl<T> InternalSender<T> {
+    pub(crate) fn send(&self, val: T) {
         let channel = unsafe {
-            &*self.channel
+            &**self.channel.get()
         };
         let mut state = channel.state.load(Relaxed);
         if (state & RECEIVER) == RECEIVER {
             unsafe {
-                (*self.channel).message.write(msg);
+                (&mut*channel.message.get()).write(val);
             }
-            state = channel.state.fetch_or(MESSAGE_READY, Release);
+            state = channel.state.fetch_or(MESSAGE_READY, Release) | MESSAGE_READY;
             loop {
-                if (state & WAKER_READY) == WAKER_READY {  
+                if (state & WAKER_READY) == WAKER_READY {
                     match channel.state.compare_exchange(state, state & (!WAKER_READY), Acquire, Relaxed) {
                         Ok(_) => {
                             unsafe {
-                                (*self.channel).waker.assume_init_read().wake();
-                                return;
+                                (&mut*channel.waker.get()).assume_init_read().wake();
                             }
+                            return;
                         }
                         Err(e) => {
                             state = e;
@@ -83,46 +84,16 @@ T: Send + 'static,
                         }
                     }
                 }
-                return;   
+                return;
             }
         }
     }
-    //internal use only
-    pub(crate) fn internal_send(&self, msg: T) {
-        let channel = unsafe {
-            &*self.channel
-        };
-        let mut state = channel.state.load(Relaxed);
-        if (state & RECEIVER) == RECEIVER {
-            unsafe {
-                (*self.channel).message.write(msg);
-            }
-            state = channel.state.fetch_or(MESSAGE_READY, Release);
-            loop {
-                if (state & WAKER_READY) == WAKER_READY {  
-                    match channel.state.compare_exchange(state, state & (!WAKER_READY), Acquire, Relaxed) {
-                        Ok(_) => {
-                            unsafe {
-                                (*self.channel).waker.assume_init_read().wake();
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            state = e;
-                            continue;
-                        }
-                    }
-                }
-                return;   
-            }
-        }  
-    }
 }
 
-impl<T> Drop for Sender<T> {
+impl<T> Drop for InternalSender<T> {
     fn drop(&mut self) {
         let channel = unsafe {
-            &*self.channel
+            &**self.channel.get()
         };
         let mut state = channel.state.load(Relaxed);
         loop {
@@ -135,41 +106,34 @@ impl<T> Drop for Sender<T> {
                     }
                 }
             }
-            if (state & MESSAGE_READY) == MESSAGE_READY  {
+            fence(Acquire);
+            if (state & MESSAGE_READY) == MESSAGE_READY {
                 unsafe {
-                    (*self.channel).message.assume_init_drop();
+                    (&mut*channel.message.get()).assume_init_drop();
                 }
             }
             if (state & WAKER_READY) == WAKER_READY {
-                fence(Acquire);
                 unsafe {
-                    (*self.channel).waker.assume_init_drop();
+                    (&mut*channel.waker.get()).assume_init_drop();
                 }
             }
             unsafe {
-                drop(Box::from_raw(self.channel));
+                ManuallyDrop::drop(&mut*self.channel.get());
             }
             return;
         }
     }
 }
 
-
-pub struct Receiver<T> {
-    channel: *mut OneShot<T>,
-}
-
-unsafe impl<T: Send> Send for Receiver<T> {}
-
-impl<T> Future for Receiver<T> {
+impl<T> Future for InternalReceiver<T> {
     type Output = Result<T, ()>;
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let channel = unsafe {
-            &*self.channel
+            &**self.channel.get()
         };
         let mut state = channel.state.load(Relaxed);
         if (state & TERMINATED) == TERMINATED {
-            panic!("can not poll after return Ready");
+            panic!("can not poll")
         }
         let mut waker_set = if (state & WAKER_READY) == WAKER_READY {
             let mut was_me = false;
@@ -190,11 +154,11 @@ impl<T> Future for Receiver<T> {
             }
             if was_me {
                 unsafe {
-                    if (*self.channel).waker.assume_init_ref().will_wake(cx.waker()) {
+                    if (&*channel.waker.get()).assume_init_ref().will_wake(cx.waker()) {
                         channel.state.fetch_or(WAKER_READY, Release);
                         true
                     } else {
-                        (*self.channel).waker.assume_init_drop();
+                        (&mut*channel.waker.get()).assume_init_drop();
                         false
                     }
                 }
@@ -204,11 +168,10 @@ impl<T> Future for Receiver<T> {
         } else {
             false
         };
-
         if (state & MESSAGE_READY) == MESSAGE_READY {
             fence(Acquire);
             let result = unsafe {
-                Ok((*self.channel).message.assume_init_read())
+                Ok((&*channel.message.get()).assume_init_read())
             };
             channel.state.fetch_and(!MESSAGE_READY, Relaxed);
             channel.state.fetch_or(TERMINATED, Relaxed);
@@ -219,7 +182,7 @@ impl<T> Future for Receiver<T> {
                 if !waker_set {
                     let waker = cx.waker().clone();
                     unsafe {
-                        (*self.channel).waker.write(waker);
+                        (&mut*channel.waker.get()).write(waker);
                     }
                     waker_set = true;
                 }
@@ -235,7 +198,7 @@ impl<T> Future for Receiver<T> {
                 channel.state.fetch_or(TERMINATED, Relaxed);
                 if waker_set {
                     unsafe {
-                        (*self.channel).waker.assume_init_drop();
+                        (&mut*channel.waker.get()).assume_init_drop();
                     }
                 }
                 if (state & WAKER_READY) == WAKER_READY {
@@ -246,13 +209,13 @@ impl<T> Future for Receiver<T> {
             if (state & MESSAGE_READY) == MESSAGE_READY {
             fence(Acquire);
             let result = unsafe {
-                Ok((*self.channel).message.assume_init_read())
+                Ok((&*channel.message.get()).assume_init_read())
             };
             channel.state.fetch_and(!MESSAGE_READY, Relaxed);
             channel.state.fetch_or(TERMINATED, Relaxed);
             if waker_set {
                 unsafe {
-                    (*self.channel).waker.assume_init_drop();
+                    (&mut*channel.waker.get()).assume_init_drop();
                 }
             }
             return Poll::Ready(result);
@@ -261,10 +224,10 @@ impl<T> Future for Receiver<T> {
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T> Drop for InternalReceiver<T> {
     fn drop(&mut self) {
         let channel = unsafe {
-            &*self.channel
+            &**self.channel.get()
         };
         let mut state = channel.state.load(Relaxed);
         loop {
@@ -277,23 +240,23 @@ impl<T> Drop for Receiver<T> {
                     }
                 }
             }
-            if (state & MESSAGE_READY) == MESSAGE_READY  {
-                fence(Acquire);
+            fence(Acquire);
+            if (state & MESSAGE_READY) == MESSAGE_READY {
                 unsafe {
-                    (*self.channel).message.assume_init_drop();
+                    (&mut*channel.message.get()).assume_init_drop();
                 }
             }
             if (state & WAKER_READY) == WAKER_READY {
-                fence(Acquire);
                 unsafe {
-                    (*self.channel).waker.assume_init_drop();
+                    (&mut*channel.waker.get()).assume_init_drop();
                 }
             }
             unsafe {
-                drop(Box::from_raw(self.channel));
+                ManuallyDrop::drop(&mut*self.channel.get());
             }
             return;
         }
     }
 }
 
+        
